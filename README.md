@@ -9,9 +9,9 @@ via `java -jar logisim-win-2.7.1.exe file.circ -tty table`.
 | Group | Tools |
 |---|---|
 | File | `create_circuit_file`, `list_circuits`, `add_circuit`, `delete_circuit`, `set_main_circuit`, `describe_circuit` |
-| Low level | `add_pin`, `add_gate`, `add_constant`, `add_wire`, `add_subcircuit_instance`, `remove` |
+| Low level | `add_pin`, `add_gate`, `add_component` (flip-flops, register, counter, mux, adder/subtractor), `add_constant`, `add_wire`, `add_subcircuit_instance`, `remove` |
 | High level | `build_logic` (expressions), `build_preset` (half/full/ripple adder, mux, decoder, comparator), `build_from_truth_table` (Quine-McCluskey) |
-| Simulation | `simulate`, `truth_table`, `verify_truth_table`, `simulate_sequential` (clocked circuits) |
+| Simulation | `simulate`, `truth_table`, `verify_truth_table`, `simulate_sequential` (clocked circuits, optional per-cycle input `sequence`) |
 
 High-level builders auto-place and auto-wire, then verify the full truth table in Logisim.
 
@@ -30,7 +30,27 @@ High-level builders auto-place and auto-wire, then verify the full truth table i
   changes. `simulate_sequential` replaces the clock pin with a Clock and adds a second
   Clock wired to a top-most output pin, so every half period yields one line
   (line 0 = power-on, line 2k-1 = after rising edge k). Non-clock inputs are held
-  constant for the whole run (no per-cycle input sequences yet).
+  constant unless `sequence` is given: then each sequenced input pin becomes a Tunnel
+  fed by a Multiplexer of Constants whose select comes from a Counter clocked on the
+  falling edge, so step k is in place before rising edge k+1 (max 16 steps).
+- Large `simulate`/`truth_table` batches are split into runs of about 8000
+  components+wires (one huge run takes minutes to load) executed 4 at a time.
+
+## Library component ports (east-facing, offsets from `loc`)
+
+Read from the 2.7.1 class files and checked in `tests/test_components.py`.
+
+| Component | Ports |
+|---|---|
+| D / T Flip-Flop | D or T (-40,20), clock (-40,0), Q (0,0), Qn (0,20), preset (-30,30), enable (-20,30), reset (-10,30) |
+| J-K / S-R Flip-Flop | J or S (-40,0), K or R (-40,20), clock (-40,10), rest as D |
+| Register | out (0,0), data (-30,0), enable (-30,10), clock (-20,20), clear (-10,20) |
+| Counter | out (0,0), data (-30,0), load (-30,-10), count (-30,10), clock (-20,20), clear (-10,20), carry (0,10) |
+| Multiplexer, 2 inputs | in0 (-30,-10), in1 (-30,10), select (-20,20) |
+| Multiplexer, n = 4/8/16 | in_i (-40, -n/2·10 + 10i), select (-20, n/2·10), out (0,0) — note the inputs are not centred |
+| Adder / Subtractor | A (-40,-10), B (-40,10), out (0,0), carry/borrow in (-20,-20), out (-20,20) |
+
+Note the D flip-flop's clock is the *upper* input and D the lower one.
 
 ## Install (Claude Code)
 

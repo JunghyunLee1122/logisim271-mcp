@@ -13,13 +13,17 @@ from __future__ import annotations
 import copy
 import itertools
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .model import Circuit, Component, Project, Wire, save
+from . import library as L
 from .runner import run_tty, run_tty_lines
 
 TEST_CIRCUIT = "__logisim271_mcp_test__"
 MAX_ROWS = 4096
+ELEMENT_BUDGET = 8000   # components + wires per Logisim run
+PARALLEL_RUNS = 4
 
 
 def _bbox(c: Circuit) -> tuple[int, int, int, int]:
@@ -80,6 +84,22 @@ def evaluate(proj: Project, circuit: str | None, rows: list[dict[str, int]],
         if unknown:
             raise ValueError(f"unknown input(s) {sorted(unknown)}; inputs are {sorted(names_in)}")
 
+    # One JVM run copies the circuit once per row; past a few tens of thousands of
+    # elements 2.7.1 takes minutes to load, so split into runs executed in parallel.
+    size = len(target.components) + len(target.wires)
+    per_run = max(1, min(len(rows), ELEMENT_BUDGET // max(1, size)))
+    chunks = [rows[i:i + per_run] for i in range(0, len(rows), per_run)]
+    if len(chunks) == 1:
+        return _evaluate_once(proj, target, rows, names_in, outs, timeout, strict)
+    with ThreadPoolExecutor(max_workers=min(PARALLEL_RUNS, len(chunks))) as ex:
+        parts = ex.map(lambda ch: _evaluate_once(proj, target, ch, names_in, outs, timeout, strict),
+                       chunks)
+        return [r for part in parts for r in part]
+
+
+def _evaluate_once(proj: Project, target: Circuit, rows: list[dict[str, int]],
+                   names_in: dict[str, Component], outs: list[Component],
+                   timeout: float, strict: bool) -> list[dict[str, int | str]]:
     x0, y0, x1, y1 = _bbox(target)
     pitch = (y1 - y0) + 100
     pitch = (pitch + 9) // 10 * 10
@@ -126,11 +146,13 @@ def evaluate(proj: Project, circuit: str | None, rows: list[dict[str, int]],
 
 CLOCK_NAMES = ("clk", "clock", "ck", "cp")
 MAX_CYCLES = 200
+MAX_SEQUENCE = 16
 
 
 def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
                 inputs: dict[str, int] | None = None, cycles: int = 8,
-                timeout: float = 60.0, strict: bool = False) -> dict:
+                timeout: float = 60.0, strict: bool = False,
+                sequence: list[dict[str, int]] | None = None) -> dict:
     """Simulate a sequential circuit with a free-running clock.
 
     The clock input pin (``clock``, or one labelled clk/clock) is replaced by a
@@ -138,6 +160,11 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
     run). A second, identical Clock wired to an extra output pin at the top makes
     tty print a line on every half period, so line i is the state after i clock
     edges (line 0 = power-on, odd lines = after a rising edge).
+
+    ``sequence[k]`` overrides ``inputs`` for the values sampled at rising edge
+    k+1; the last entry stays in force afterwards. Sequenced inputs are fed by
+    a Counter clocked on the falling edge selecting Constants through a
+    Multiplexer, joined to the circuit with Tunnels.
     """
     if not 1 <= cycles <= MAX_CYCLES:
         raise ValueError(f"cycles must be 1..{MAX_CYCLES}")
@@ -156,9 +183,21 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
             raise ValueError(f"several clock-like pins {cands}; pass clock=")
     if clock is not None and clock not in names_in:
         raise ValueError(f"unknown clock pin {clock!r}; inputs are {sorted(names_in)}")
-    unknown = set(inputs) - set(names_in) - {clock}
-    if unknown:
-        raise ValueError(f"unknown input(s) {sorted(unknown)}; inputs are {sorted(names_in)}")
+    sequence = [dict(st) for st in (sequence or [])]
+    if len(sequence) > MAX_SEQUENCE:
+        raise ValueError(f"sequence longer than {MAX_SEQUENCE} steps")
+    for st in [inputs] + sequence:
+        unknown = set(st) - set(names_in) - {clock}
+        if unknown:
+            raise ValueError(f"unknown input(s) {sorted(unknown)}; inputs are {sorted(names_in)}")
+        if clock in st:
+            raise ValueError(f"the clock {clock!r} cannot be given a value")
+    seq_names = sorted({k for st in sequence for k in st})
+    steps_in: list[dict[str, int]] = []
+    cur = {n: int(inputs.get(n, 0)) for n in names_in if n != clock}
+    for st in sequence:
+        cur = {**cur, **{k: int(v) for k, v in st.items()}}
+        steps_in.append(dict(cur))
     outs = _sorted_outputs(target)
     if not outs:
         raise ValueError(f"circuit {target.name!r} has no output pins")
@@ -174,8 +213,11 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
         if comp is clock_pin:
             attrs = {k: v for k, v in comp.attrs.items() if k in ("facing", "label")}
             tc.components.append(Component("#Wiring", "Clock", loc, attrs))
+        elif comp.is_input_pin() and _pin_name(names_in, comp) in seq_names:
+            name = _pin_name(names_in, comp)
+            tc.components.append(L.tunnel(f"__seq_{seq_names.index(name)}", loc, comp.width()))
         elif comp.is_input_pin():
-            name = next(n for n, p in names_in.items() if p is comp)
+            name = _pin_name(names_in, comp)
             val, w = int(inputs.get(name, 0)), comp.width()
             if val < 0 or val >= (1 << w):
                 raise ValueError(f"value {val} does not fit {w}-bit input {name!r}")
@@ -189,6 +231,9 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
             tc.components.append(nc)
     for w in target.wires:
         tc.wires.append(Wire((w.a[0] + dx, w.a[1] + dy), (w.b[0] + dx, w.b[1] + dy)))
+    if seq_names:
+        _add_sequencer(tc, names_in, seq_names, steps_in, cycles,
+                       x=(_bbox(tc)[2] // 10) * 10 + 200)
     # observer: Clock -> output pin, top-most so it is tty column 0
     tc.components.append(Component("#Wiring", "Clock", (50, 50), {}))
     tc.components.append(Component("#Wiring", "Pin", (100, 50),
@@ -210,7 +255,7 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
     for i, s in enumerate(steps):
         if s["clk"] != i % 2:
             raise RuntimeError(f"clock observer out of phase at line {i}: {s['clk']}")
-    return {
+    res = {
         "clock": clock,
         "inputs": inputs,
         "initial": steps[0]["out"],
@@ -218,6 +263,53 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
                               for k in range(cycles)],
         "half_steps": steps,
     }
+    if sequence:
+        last = steps_in[-1]
+        for k, e in enumerate(res["after_rising_edge"]):
+            e["in"] = {n: (steps_in[k] if k < len(steps_in) else last)[n] for n in seq_names}
+    return res
+
+
+def _pin_name(names_in: dict[str, Component], comp: Component) -> str:
+    return next(n for n, p in names_in.items() if p is comp)
+
+
+def _add_sequencer(tc: Circuit, names_in: dict[str, Component], seq_names: list[str],
+                   steps_in: list[dict[str, int]], cycles: int, x: int) -> None:
+    """Clock -> NOT -> Counter (counts on falling edges) -> select of one Multiplexer
+    per sequenced input whose data inputs are Constants holding the per-step values.
+    Counter value k (reached after falling edge k) selects the values for rising edge k+1."""
+    n_steps = len(steps_in)
+    sel = max(1, (n_steps - 1).bit_length())
+    n = 1 << sel
+    y = 100
+    tc.components.append(Component("#Wiring", "Clock", (x, y), {}))
+    tc.components.append(L.gate("NOT", (x + 60, y)))
+    tc.wires.append(Wire((x, y), (x + 30, y)))
+    cnt = L.component("counter", (x + 200, y + 40), width=sel)
+    tc.components.append(cnt)
+    cp = L.ports(cnt)
+    tc.wires.append(Wire((x + 60, y), (x + 120, y)))
+    tc.wires.append(Wire((x + 120, y), (x + 120, y + 80)))
+    tc.wires.append(Wire((x + 120, y + 80), (cp["clock"][0], y + 80)))
+    tc.wires.append(Wire((cp["clock"][0], y + 80), cp["clock"]))
+    # count enable high; counter stops at the last step (values then stay put)
+    tc.components.append(L.constant(1, cp["count"]))
+    cnt.attrs["max"] = hex(n_steps - 1 if n_steps > 1 else 1)
+    cnt.attrs["ongoal"] = "stay"
+    tc.components.append(L.tunnel("__seq_step", cp["out"], sel))
+    my = y + 160
+    for j, name in enumerate(seq_names):
+        w = names_in[name].width()
+        mux = L.component("mux", (x + 200, my), width=w, select_bits=sel)
+        tc.components.append(mux)
+        mp = L.ports(mux)
+        for i in range(n):
+            v = steps_in[min(i, n_steps - 1)][name]
+            tc.components.append(L.constant(v, mp[f"in{i}"], w))
+        tc.components.append(L.tunnel("__seq_step", mp["select"], sel))
+        tc.components.append(L.tunnel(f"__seq_{j}", mp["out"], w))
+        my += 10 * n + 80
 
 
 def input_widths(proj: Project, circuit: str | None) -> dict[str, int]:

@@ -21,7 +21,9 @@ mcp = FastMCP(
         "horizontal/vertical. A wire end touching another wire (even mid-span) connects; "
         "two wires crossing mid-span do not. "
         "Prefer build_logic / build_preset / build_from_truth_table, then confirm with "
-        "truth_table or verify_truth_table. Clocked circuits: simulate_sequential (non-clock inputs held constant)."
+        "truth_table or verify_truth_table. Flip-flops, registers, counters, muxes and adders: add_component (returns port "
+        "coordinates). Clocked circuits: simulate_sequential (inputs held constant, or "
+        "changed per cycle with sequence)."
     ),
 )
 
@@ -106,6 +108,8 @@ def _lint(c: Circuit) -> list[str]:
     issues = []
     for comp, p in known:
         for name, pt in p.items():
+            if L.optional_port(comp, name):
+                continue
             if not touches_wire(pt) and port_pts.get(pt, 0) < 2:
                 who = comp.label or f"{comp.name}@{comp.loc}"
                 issues.append(f"{who}.{name} at {pt} is unconnected")
@@ -220,6 +224,27 @@ def add_gate(path: str, kind: str, x: int, y: int, inputs: int = 2,
     comp = L.gate(kind, (_snap(x), _snap(y)), inputs=inputs, label=label)
     if facing != "east":
         comp.attrs["facing"] = facing
+    c.components.append(comp)
+    save(proj, p)
+    return _comp_info(comp)
+
+
+@mcp.tool()
+def add_component(path: str, kind: str, x: int, y: int, width: int = 1, select_bits: int = 2,
+                  label: str = "", trigger: str = "rising", circuit: str | None = None) -> dict:
+    """Add a built-in library component (east-facing) and return its absolute ports.
+
+    kind: dff | tff | jkff | srff (flip-flops: D/T or J,K / S,R, clock, Q, Qn, async
+    reset / preset / enable), register (data, clock, clear, enable, out), counter
+    (clock, count, load, data, clear, out, carry), mux (in0.., select, out;
+    select_bits 1..4), adder (A, B, carry_in, out, carry_out), subtractor (A, B,
+    borrow_in, out, borrow_out). width applies to register/counter/mux/adder/
+    subtractor data. trigger (memory parts): rising | falling | high | low.
+    Optional ports (Qn, reset, preset, enable, carry...) may stay unconnected."""
+    p, proj = _open(path)
+    c = proj.circuit(circuit)
+    comp = L.component(kind, (_snap(x), _snap(y)), width=width, select_bits=select_bits,
+                       label=label, trigger=trigger)
     c.components.append(comp)
     save(proj, p)
     return _comp_info(comp)
@@ -426,14 +451,18 @@ def truth_table(path: str, circuit: str | None = None, strict: bool = True) -> d
 @mcp.tool()
 def simulate_sequential(path: str, inputs: dict[str, int] | None = None, cycles: int = 8,
                         clock: str | None = None, circuit: str | None = None,
+                        sequence: list[dict[str, int]] | None = None,
                         include_half_steps: bool = False) -> dict:
     """Simulate a clocked (sequential) circuit in Logisim 2.7.1.
     The clock input pin (``clock``, auto-detected if labelled clk/clock) is driven by a
     free-running Clock; a Clock component already in the circuit also works. Other
-    inputs are held fixed at ``inputs`` (unlisted = 0) for the whole run.
+    inputs are held at ``inputs`` (unlisted = 0). ``sequence`` (up to 16 steps) changes
+    them per cycle: sequence[k] = inputs sampled at rising edge k+1, each step keeps
+    earlier values it does not mention, and the last step stays in force.
     Returns power-on outputs and outputs after each rising edge (cycle 1..cycles)."""
     p, proj = _open(path)
-    r = sim.run_clocked(proj, circuit, clock=clock, inputs=inputs, cycles=cycles)
+    r = sim.run_clocked(proj, circuit, clock=clock, inputs=inputs, cycles=cycles,
+                        sequence=sequence)
     if not include_half_steps:
         r.pop("half_steps")
     return r
