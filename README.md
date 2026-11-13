@@ -52,11 +52,53 @@ Read from the 2.7.1 class files and checked in `tests/test_components.py`.
 
 Note the D flip-flop's clock is the *upper* input and D the lower one.
 
+## Hand-drawn schematics (`logisim271_mcp.schematic`)
+
+For Python scripts that should produce a schematic a person could have drawn (real wires,
+junctions, signal rails, few tunnels) instead of a tunnel on every port. `Sheet` records the
+intended net of every wire and port, and `check()` recomputes connectivity with Logisim's own
+rules, reporting `short`, `open`, `stray` and `unconnected` with coordinates before the file is opened.
+
+```python
+from logisim271_mcp.model import Project
+from logisim271_mcp.schematic import Sheet
+
+proj = Project()
+s = Sheet(proj, "FULL_ADDER")
+a = s.pin_in("A", (40, 100))
+x = s.gate("XOR", (220, 120), ["A", "B"], "P")   # returns port points: in0, in1, out
+s.wire("A", a, (100, 100), x["in0"])             # polyline, net name first
+s.hvh("P", x["out"], (300, 140), 260)            # horizontal, vertical at x=260, horizontal
+s.check()                                        # raises SchematicError on short / open
+```
+
+Other helpers: `pin_out`, `const`, `part` (library parts), `inst` (subcircuits), `tunnel`,
+`hv` / `vh` / `vhv`, `shift(dx, dy)`. Splitters accept `facing` east / west / north / south.
+
+Layout patterns and checker messages are in the Claude Code skill
+[`skills/logisim-hand-drawn/SKILL.md`](skills/logisim-hand-drawn/SKILL.md). Install it by copying the
+folder to `~/.claude/skills/`.
+
 ## Install (Claude Code)
 
 Requirements: Java 8+, Python 3.10+, [uv](https://docs.astral.sh/uv/), and Logisim 2.7.1
 (`logisim-win-2.7.1.exe` or `logisim-generic-2.7.1.jar` from
 [SourceForge](https://sourceforge.net/projects/circuit/files/2.7.x/2.7.1/)). Logisim is not bundled.
+
+### Option A: plugin (MCP server + skill in one step)
+
+1. Set the `LOGISIM_JAR` environment variable to your Logisim 2.7.1 exe/jar path
+   (e.g. `setx LOGISIM_JAR C:/path/to/logisim-win-2.7.1.exe` on Windows), then restart your terminal.
+2. In Claude Code:
+
+```
+/plugin marketplace add JunghyunLee1122/logisim271-mcp
+/plugin install logisim271@logisim271-mcp
+```
+
+Restart Claude Code. This installs the `logisim271` MCP server and the `logisim-hand-drawn` skill.
+
+### Option B: MCP server only
 
 ```bash
 claude mcp add logisim271 --env LOGISIM_JAR=C:/path/to/logisim-win-2.7.1.exe -- uvx --from git+https://github.com/JunghyunLee1122/logisim271-mcp logisim271-mcp

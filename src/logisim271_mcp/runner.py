@@ -39,11 +39,15 @@ class SimError(RuntimeError):
     pass
 
 
-def run_tty_lines(circ_path: str | Path, n: int, timeout: float = DEFAULT_TIMEOUT) -> list[list[str]]:
+def run_tty_lines(circ_path: str | Path, n: int, timeout: float = DEFAULT_TIMEOUT,
+                  load: str | Path | None = None) -> list[list[str]]:
     """Read the first ``n`` tty lines (tty prints a line whenever outputs change;
-    clocks keep ticking), then kill the JVM. Each line is split on tabs."""
+    clocks keep ticking), then kill the JVM. Each line is split on tabs.
+    ``load`` is a memory image file loaded into every RAM (Logisim ``-load``)."""
     cmd = [find_java(), "-Djava.awt.headless=true", "-jar", str(find_jar()),
            str(circ_path), "-tty", "table"]
+    if load is not None:
+        cmd += ["-load", str(load)]
     proc = subprocess.Popen(
         cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

@@ -1,0 +1,11 @@
+{
+  "name": "logisim271-mcp",
+  "owner": { "name": "JunghyunLee1122" },
+  "plugins": [
+    {
+      "name": "logisim271",
+      "source": "./",
+      "description": "Build, verify and simulate Logisim 2.7.1 circuits (MCP server + logisim-hand-drawn skill)"
+    }
+  ]
+}

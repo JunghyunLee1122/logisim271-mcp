@@ -56,7 +56,8 @@ def pin_names(pins: list[Component]) -> list[str]:
 
 
 def _parse_value(s: str) -> int | str:
-    s = s.strip()
+    # tty groups wide values in nibbles: "0010 0010"
+    s = s.strip().replace(" ", "")
     if s and all(ch in "01" for ch in s):
         return int(s, 2)
     return s  # 'x' (floating), 'E' (error) or mixed like '1x0E'
@@ -112,7 +113,13 @@ def _evaluate_once(proj: Project, target: Circuit, rows: list[dict[str, int]],
         dx = -x0 + 50
         for comp in target.components:
             loc = (comp.loc[0] + dx, comp.loc[1] + dy)
-            if comp.is_input_pin():
+            if comp.name == "Tunnel" and comp.lib == "#Wiring":
+                # tunnels are circuit-global: keep each row copy's tunnels apart
+                nc = copy.deepcopy(comp)
+                nc.loc = loc
+                nc.attrs["label"] = f"{comp.label}__row{ri}"
+                tc.components.append(nc)
+            elif comp.is_input_pin():
                 name = next(n for n, p in names_in.items() if p is comp)
                 val = int(row.get(name, 0))
                 w = comp.width()
@@ -152,7 +159,8 @@ MAX_SEQUENCE = 16
 def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
                 inputs: dict[str, int] | None = None, cycles: int = 8,
                 timeout: float = 60.0, strict: bool = False,
-                sequence: list[dict[str, int]] | None = None) -> dict:
+                sequence: list[dict[str, int]] | None = None,
+                ram_image: list[int] | None = None) -> dict:
     """Simulate a sequential circuit with a free-running clock.
 
     The clock input pin (``clock``, or one labelled clk/clock) is replaced by a
@@ -165,6 +173,9 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
     k+1; the last entry stays in force afterwards. Sequenced inputs are fed by
     a Counter clocked on the falling edge selecting Constants through a
     Multiplexer, joined to the circuit with Tunnels.
+
+    ``ram_image`` (words from address 0) is loaded into every RAM before the
+    first clock edge, as Logisim's ``-load`` / right-click "Load Image" does.
     """
     if not 1 <= cycles <= MAX_CYCLES:
         raise ValueError(f"cycles must be 1..{MAX_CYCLES}")
@@ -244,7 +255,13 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
     with tempfile.TemporaryDirectory(prefix="logisim271_") as td:
         path = Path(td) / "test.circ"
         save(test, path, gate_undefined="error" if strict else "ignore")
-        lines = run_tty_lines(path, n, timeout=timeout)
+        img = None
+        if ram_image is not None:
+            if not any(c.name == "RAM" for cc in test.circuits for c in cc.components):
+                raise ValueError("ram_image given but the circuit has no RAM")
+            img = Path(td) / "ram.img"
+            write_ram_image(img, ram_image)
+        lines = run_tty_lines(path, n, timeout=timeout, load=img)
     names_out = pin_names(outs)
     steps = []
     for i, vals in enumerate(lines):
@@ -268,6 +285,14 @@ def run_clocked(proj: Project, circuit: str | None, clock: str | None = None,
         for k, e in enumerate(res["after_rising_edge"]):
             e["in"] = {n: (steps_in[k] if k < len(steps_in) else last)[n] for n in seq_names}
     return res
+
+
+def write_ram_image(path: str | Path, words: list[int]) -> None:
+    """Write a Logisim memory image (``v2.0 raw``, hex words from address 0)."""
+    if any(int(w) < 0 for w in words):
+        raise ValueError("ram_image words must be non-negative")
+    body = " ".join(format(int(w), "x") for w in words)
+    Path(path).write_text("v2.0 raw\n" + body + "\n", encoding="ascii")
 
 
 def _pin_name(names_in: dict[str, Component], comp: Component) -> str:
@@ -298,7 +323,9 @@ def _add_sequencer(tc: Circuit, names_in: dict[str, Component], seq_names: list[
     cnt.attrs["max"] = hex(n_steps - 1 if n_steps > 1 else 1)
     cnt.attrs["ongoal"] = "stay"
     tc.components.append(L.tunnel("__seq_step", cp["out"], sel))
-    my = y + 160
+    # first mux input must sit below the clock wire at y + 80 (a 16-input mux's
+    # top input used to land on it and short the clock to that step's value)
+    my = y + 160 + 10 * (n // 2)
     for j, name in enumerate(seq_names):
         w = names_in[name].width()
         mux = L.component("mux", (x + 200, my), width=w, select_bits=sel)

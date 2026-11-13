@@ -66,14 +66,14 @@ def _free_origin(c: Circuit) -> tuple[int, int]:
     return (100, (max(ys) + 130) // 10 * 10)
 
 
-def _comp_info(comp: Component) -> dict[str, Any]:
+def _comp_info(comp: Component, proj: Project | None = None) -> dict[str, Any]:
     d: dict[str, Any] = {"type": comp.name, "lib": comp.lib or "(subcircuit)", "loc": list(comp.loc)}
     if comp.label:
         d["label"] = comp.label
     extra = {k: v for k, v in comp.attrs.items() if k not in ("label", "labelloc", "tristate")}
     if extra:
         d["attrs"] = extra
-    p = L.ports(comp)
+    p = L.ports(comp, proj)
     if p:
         d["ports"] = {k: list(v) for k, v in p.items()}
     return d
@@ -87,7 +87,7 @@ def _on_interior(pt: tuple[int, int], w) -> bool:
     return False
 
 
-def _lint(c: Circuit) -> list[str]:
+def _lint(c: Circuit, proj: Project | None = None) -> list[str]:
     """Unconnected ports and dangling wire ends. In 2.7.1 a point touching a wire's
     middle IS connected (T-junction), and two wires crossing mid-span are NOT."""
     ends: dict[tuple[int, int], int] = {}
@@ -100,7 +100,7 @@ def _lint(c: Circuit) -> list[str]:
     port_pts: dict[tuple[int, int], int] = {}
     known = []
     for comp in c.components:
-        p = L.ports(comp)
+        p = L.ports(comp, proj)
         if p:
             known.append((comp, p))
             for pt in p.values():
@@ -191,9 +191,9 @@ def describe_circuit(path: str, circuit: str | None = None) -> dict:
     c = proj.circuit(circuit)
     return {
         "circuit": c.name,
-        "components": [_comp_info(x) for x in c.components],
+        "components": [_comp_info(x, proj) for x in c.components],
         "wires": [[list(w.a), list(w.b)] for w in c.wires],
-        "warnings": _lint(c),
+        "warnings": _lint(c, proj),
     }
 
 
@@ -214,14 +214,15 @@ def add_pin(path: str, label: str, x: int, y: int, output: bool = False,
 
 @mcp.tool()
 def add_gate(path: str, kind: str, x: int, y: int, inputs: int = 2,
-             facing: str = "east", label: str = "", circuit: str | None = None) -> dict:
+             facing: str = "east", label: str = "", width: int = 1,
+             circuit: str | None = None) -> dict:
     """Add AND/OR/NAND/NOR/XOR/XNOR (2-5 inputs), NOT or BUF.
 
     (x, y) is the gate's OUTPUT point. Returns absolute port coordinates to wire to.
-    XOR/XNOR use parity semantics (odd number of 1s)."""
+    XOR/XNOR use parity semantics (odd number of 1s). width > 1 = bitwise on buses."""
     p, proj = _open(path)
     c = proj.circuit(circuit)
-    comp = L.gate(kind, (_snap(x), _snap(y)), inputs=inputs, label=label)
+    comp = L.gate(kind, (_snap(x), _snap(y)), inputs=inputs, label=label, width=width)
     if facing != "east":
         comp.attrs["facing"] = facing
     c.components.append(comp)
@@ -231,7 +232,9 @@ def add_gate(path: str, kind: str, x: int, y: int, inputs: int = 2,
 
 @mcp.tool()
 def add_component(path: str, kind: str, x: int, y: int, width: int = 1, select_bits: int = 2,
-                  label: str = "", trigger: str = "rising", circuit: str | None = None) -> dict:
+                  label: str = "", trigger: str = "rising", addr_bits: int = 8,
+                  splits: list[int] | None = None, in_width: int = 1,
+                  circuit: str | None = None) -> dict:
     """Add a built-in library component (east-facing) and return its absolute ports.
 
     kind: dff | tff | jkff | srff (flip-flops: D/T or J,K / S,R, clock, Q, Qn, async
@@ -240,11 +243,18 @@ def add_component(path: str, kind: str, x: int, y: int, width: int = 1, select_b
     select_bits 1..4), adder (A, B, carry_in, out, carry_out), subtractor (A, B,
     borrow_in, out, borrow_out). width applies to register/counter/mux/adder/
     subtractor data. trigger (memory parts): rising | falling | high | low.
-    Optional ports (Qn, reset, preset, enable, carry...) may stay unconnected."""
+    ram: addr_bits x width RAM, separate ports (addr, data = read out, din, we = store
+    on rising clock, clock, optional cs/oe/clear); load contents with ram_image in
+    simulate_sequential or write_ram_image for the GUI. decoder: select -> out0..
+    out(2**select_bits - 1). splitter: combined (width bits) <-> split0.. with group
+    sizes ``splits`` LSB first, e.g. [5, 3]. bit_extender: in (in_width) -> out (width),
+    zero-extended. Optional ports (Qn, reset, preset, enable, carry...) may stay
+    unconnected; note an unconnected counter count input counts every cycle."""
     p, proj = _open(path)
     c = proj.circuit(circuit)
     comp = L.component(kind, (_snap(x), _snap(y)), width=width, select_bits=select_bits,
-                       label=label, trigger=trigger)
+                       label=label, trigger=trigger, addr_bits=addr_bits, splits=splits,
+                       in_width=in_width)
     c.components.append(comp)
     save(proj, p)
     return _comp_info(comp)
@@ -265,8 +275,10 @@ def add_constant(path: str, value: int, x: int, y: int, width: int = 1,
 @mcp.tool()
 def add_subcircuit_instance(path: str, subcircuit: str, x: int, y: int, label: str = "",
                             circuit: str | None = None) -> dict:
-    """Place an instance of another circuit of this project. Port positions depend on
-    Logisim's default appearance and are NOT computed - open in Logisim to wire it."""
+    """Place an instance of another circuit of this project (east-facing, default
+    appearance). Returns its ports keyed by the subcircuit's pin labels: input pins
+    (facing east) on the west edge, output pins on the east edge, each top-to-bottom
+    in the subcircuit's pin y order. Finish the subcircuit's pins before placing."""
     p, proj = _open(path)
     c = proj.circuit(circuit)
     proj.circuit(subcircuit)
@@ -275,7 +287,7 @@ def add_subcircuit_instance(path: str, subcircuit: str, x: int, y: int, label: s
     comp = Component(None, subcircuit, (_snap(x), _snap(y)), {"label": label} if label else {})
     c.components.append(comp)
     save(proj, p)
-    return _comp_info(comp)
+    return _comp_info(comp, proj)
 
 
 @mcp.tool()
@@ -290,7 +302,7 @@ def add_wire(path: str, points: list[list[int]], circuit: str | None = None) -> 
     for a, b in zip(pts, pts[1:]):
         c.add_wire(a, b)
     save(proj, p)
-    return {"segments": len(pts) - 1, "warnings": _lint(c)}
+    return {"segments": len(pts) - 1, "warnings": _lint(c, proj)}
 
 
 @mcp.tool()
@@ -452,20 +464,31 @@ def truth_table(path: str, circuit: str | None = None, strict: bool = True) -> d
 def simulate_sequential(path: str, inputs: dict[str, int] | None = None, cycles: int = 8,
                         clock: str | None = None, circuit: str | None = None,
                         sequence: list[dict[str, int]] | None = None,
-                        include_half_steps: bool = False) -> dict:
+                        include_half_steps: bool = False,
+                        ram_image: list[int] | None = None) -> dict:
     """Simulate a clocked (sequential) circuit in Logisim 2.7.1.
     The clock input pin (``clock``, auto-detected if labelled clk/clock) is driven by a
     free-running Clock; a Clock component already in the circuit also works. Other
     inputs are held at ``inputs`` (unlisted = 0). ``sequence`` (up to 16 steps) changes
     them per cycle: sequence[k] = inputs sampled at rising edge k+1, each step keeps
     earlier values it does not mention, and the last step stays in force.
+    ram_image (words from address 0) is loaded into every RAM before the first edge.
     Returns power-on outputs and outputs after each rising edge (cycle 1..cycles)."""
     p, proj = _open(path)
     r = sim.run_clocked(proj, circuit, clock=clock, inputs=inputs, cycles=cycles,
-                        sequence=sequence)
+                        sequence=sequence, ram_image=ram_image)
     if not include_half_steps:
         r.pop("half_steps")
     return r
+
+
+@mcp.tool()
+def write_ram_image(path: str, words: list[int]) -> dict:
+    """Write a Logisim memory image file (v2.0 raw, words from address 0) that the GUI
+    loads via right-click on a RAM -> Load Image... (or logisim -tty ... -load file)."""
+    p = Path(path).expanduser().resolve()
+    sim.write_ram_image(p, words)
+    return {"path": str(p), "words": len(words)}
 
 
 @mcp.tool()
