@@ -104,6 +104,31 @@ Restart Claude Code. This installs the `logisim271` MCP server and the `logisim-
 claude mcp add logisim271 --env LOGISIM_JAR=C:/path/to/logisim-win-2.7.1.exe -- uvx --from git+https://github.com/JunghyunLee1122/logisim271-mcp logisim271-mcp
 ```
 
+### Option C: Codex CLI
+
+Codex does not read `.claude-plugin`, so register the MCP server and the skill separately.
+
+```bash
+codex mcp add logisim271 --env LOGISIM_JAR=C:/path/to/logisim-win-2.7.1.exe -- uvx --from git+https://github.com/JunghyunLee1122/logisim271-mcp logisim271-mcp
+```
+
+Or add it to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.logisim271]
+command = "uvx"
+args = ["--from", "git+https://github.com/JunghyunLee1122/logisim271-mcp", "logisim271-mcp"]
+env = { LOGISIM_JAR = "C:/path/to/logisim-win-2.7.1.exe" }
+```
+
+Skill: copy `skills/logisim-hand-drawn/` into `~/.codex/skills/` (some Codex versions use
+`~/.agents/skills/` instead), then start a new Codex session.
+
+```bash
+git clone https://github.com/JunghyunLee1122/logisim271-mcp.git
+cp -r logisim271-mcp/skills/logisim-hand-drawn ~/.codex/skills/
+```
+
 Then ask e.g. "full adder 만들어줘" / "build a 4-bit ripple adder in adder.circ and verify it".
 
 ## Development
