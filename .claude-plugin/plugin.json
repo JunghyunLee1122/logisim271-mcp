@@ -1,0 +1,8 @@
+{
+  "name": "logisim271",
+  "version": "0.1.0",
+  "description": "Build, verify and simulate Logisim 2.7.1 (classic) circuits",
+  "author": { "name": "JunghyunLee1122" },
+  "repository": "https://github.com/JunghyunLee1122/logisim271-mcp",
+  "license": "MIT"
+}

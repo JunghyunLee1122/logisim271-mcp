@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "logisim271": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/JunghyunLee1122/logisim271-mcp", "logisim271-mcp"],
+      "env": { "LOGISIM_JAR": "${LOGISIM_JAR}" }
+    }
+  }
+}
